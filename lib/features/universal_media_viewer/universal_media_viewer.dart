@@ -59,7 +59,7 @@ class _UniversalMediaViewerState extends State<UniversalMediaViewer> {
                         MediaItemModel(
                           url: 'https://mozilla.github.io/pdf.js/web/compressed.tracemonkey-pldi-09.pdf',
                           type: MediaType.pdf,
-                          title: 'Doc 1',
+                          title: 'compressed.tracemonkey-pldi-09.pdf',
                         ),
                         MediaItemModel(
                           url: 'https://images.unsplash.com/photo-1746469535771-71a672e8719f?q=80&w=2070&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',

@@ -127,9 +127,14 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   int _currentIndex = 0;
   bool _isLoading = false;
   String? _error;
-  int _currentRetryAttempt = 0; // เพิ่มตัวแปรนี้
+  int _currentRetryAttempt = 0;
   final Map<int, String?> _localPaths = {};
   final Map<int, bool> _downloadingStates = {};
+
+  // Performance optimizations
+  final Map<int, bool> _preloadingStates = {}; // ติดตาม preloading
+  final Set<int> _preloadedIndexes = {}; // เก็บ index ที่ preload แล้ว
+  Timer? _preloadTimer; // สำหรับ delayed preloading
 
   @override
   void initState() {
@@ -142,7 +147,29 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   @override
   void dispose() {
     _pageController.dispose();
+    _preloadTimer?.cancel(); // cancel timer
+    _cleanupTempFiles(); // cleanup temp files
     super.dispose();
+  }
+
+  // Cleanup temporary files เมื่อปิด dialog
+  Future<void> _cleanupTempFiles() async {
+    try {
+      final dir = await getTemporaryDirectory();
+      final tempFiles = await dir.list().where((file) =>
+      file.path.contains('temp_pdf_') && file.path.endsWith('.pdf')
+      ).toList();
+
+      for (final file in tempFiles) {
+        try {
+          await file.delete();
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+      }
+    } catch (e) {
+      // Ignore cleanup errors
+    }
   }
 
   Future<void> _preloadCurrentFile() async {
@@ -323,6 +350,79 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
         _downloadPDFWithRetry(index);
       }
     }
+
+    // Preload adjacent pages สำหรับ smooth experience
+    _schedulePreloading(index);
+  }
+
+  // Schedule preloading ของ adjacent pages
+  void _schedulePreloading(int currentIndex) {
+    _preloadTimer?.cancel();
+    _preloadTimer = Timer(const Duration(milliseconds: 500), () {
+      _preloadAdjacentPages(currentIndex);
+    });
+  }
+
+  // Preload หน้าข้าง ๆ สำหรับ smooth navigation
+  Future<void> _preloadAdjacentPages(int currentIndex) async {
+    final preloadIndexes = <int>[];
+
+    // Preload previous page
+    if (currentIndex > 0) {
+      preloadIndexes.add(currentIndex - 1);
+    }
+
+    // Preload next page
+    if (currentIndex < widget.mediaItems.length - 1) {
+      preloadIndexes.add(currentIndex + 1);
+    }
+
+    for (final index in preloadIndexes) {
+      if (!_preloadedIndexes.contains(index) &&
+          _downloadingStates[index] != true &&
+          _localPaths[index] == null) {
+
+        final item = widget.mediaItems[index];
+        if (item.type == MediaType.pdf && !item.hasLocalData) {
+          _preloadedIndexes.add(index);
+          _preloadPDF(index);
+        }
+      }
+    }
+  }
+
+  // Background preloading สำหรับ PDF (ไม่แสดง loading state)
+  Future<void> _preloadPDF(int index) async {
+    if (_preloadingStates[index] == true) return;
+
+    _preloadingStates[index] = true;
+
+    try {
+      if (!await _checkNetworkConnection()) return;
+
+      final url = widget.mediaItems[index].url;
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; Flutter app)',
+          'Accept': 'application/pdf,*/*',
+        },
+      ).timeout(const Duration(seconds: 15)); // สั้นกว่า main download
+
+      if (response.statusCode == 200) {
+        final bytes = response.bodyBytes;
+        final dir = await getTemporaryDirectory();
+        final file = File('${dir.path}/temp_pdf_preload_$index.pdf');
+        await file.writeAsBytes(bytes);
+
+        // อัพเดท path โดยไม่ trigger UI rebuild
+        _localPaths[index] = file.path;
+      }
+    } catch (e) {
+      // Ignore preload errors
+    } finally {
+      _preloadingStates[index] = false;
+    }
   }
 
   Widget _buildCurrentMedia() {
@@ -479,6 +579,10 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 8),
         itemCount: widget.mediaItems.length,
+        // Performance: ใช้ itemExtent สำหรับ better scrolling
+        itemExtent: 76, // 60 width + 16 margin
+        // Performance: เก็บ thumbnail widget ใน cache
+        cacheExtent: 400, // cache thumbnails
         itemBuilder: (context, index) {
           final item = widget.mediaItems[index];
           final isSelected = index == _currentIndex;
@@ -511,6 +615,9 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
                           ? Image.memory(
                         item.localData!,
                         fit: BoxFit.cover,
+                        // Performance: ลด memory usage สำหรับ thumbnail
+                        cacheWidth: 120,
+                        cacheHeight: 120,
                         errorBuilder: (context, error, stackTrace) {
                           return Container(
                             color: Colors.grey[300],
@@ -521,6 +628,9 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
                           : Image.network(
                         item.url,
                         fit: BoxFit.cover,
+                        // Performance optimizations สำหรับ network images
+                        cacheWidth: 120,
+                        cacheHeight: 120,
                         headers: const {
                           'User-Agent': 'Mozilla/5.0 (compatible; Flutter app)',
                         },
