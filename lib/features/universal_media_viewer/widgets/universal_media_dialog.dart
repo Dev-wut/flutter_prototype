@@ -1,4 +1,4 @@
-import 'dart:developer';
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -33,8 +33,14 @@ class UniversalMediaDialog extends StatefulWidget {
     required String url,
     required MediaType type,
     String? title,
+    Uint8List? localData
   }) async {
-    final mediaItem = MediaItemModel(url: url, type: type, title: title);
+    final mediaItem = MediaItemModel(
+      url: url,
+      type: type,
+      title: title,
+      localData: localData,
+    );
 
     await showDialog(
       context: context,
@@ -121,8 +127,9 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   int _currentIndex = 0;
   bool _isLoading = false;
   String? _error;
-  Map<int, String?> _localPaths = {};
-  Map<int, bool> _downloadingStates = {};
+  int _currentRetryAttempt = 0; // เพิ่มตัวแปรนี้
+  final Map<int, String?> _localPaths = {};
+  final Map<int, bool> _downloadingStates = {};
 
   @override
   void initState() {
@@ -139,12 +146,17 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   }
 
   Future<void> _preloadCurrentFile() async {
-    if (widget.mediaItems[_currentIndex].type == MediaType.pdf) {
-      await _downloadPDF(_currentIndex);
+    final currentItem = widget.mediaItems[_currentIndex];
+
+    // ถ้ามี localData ให้ใช้ก่อน
+    if (currentItem.hasLocalData && currentItem.type == MediaType.pdf) {
+      await _savePDFFromLocalData(_currentIndex);
+    } else if (currentItem.type == MediaType.pdf) {
+      await _downloadPDFWithRetry(_currentIndex);
     }
   }
 
-  Future<void> _downloadPDF(int index) async {
+  Future<void> _savePDFFromLocalData(int index) async {
     if (_downloadingStates[index] == true) return;
 
     setState(() {
@@ -153,8 +165,57 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
     });
 
     try {
+      final localData = widget.mediaItems[index].localData!;
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/temp_pdf_local_$index.pdf');
+      await file.writeAsBytes(localData);
+
+      setState(() {
+        _localPaths[index] = file.path;
+      });
+    } catch (e) {
+      setState(() {
+        _error = 'Failed to save local PDF: $e';
+      });
+    } finally {
+      setState(() {
+        _downloadingStates[index] = false;
+        _isLoading = false;
+      });
+    }
+  }
+
+  // ปรับปรุง _downloadPDF ให้ throw error แทนการ setState
+  Future<void> _downloadPDF(int index) async {
+    if (_downloadingStates[index] == true) return;
+
+    setState(() {
+      _downloadingStates[index] = true;
+      _isLoading = true;
+      _error = null;
+    });
+
+    try {
+      // เช็ค network ก่อน
+      if (!await _checkNetworkConnection()) {
+        throw const SocketException('No internet connection. Please check your network settings.');
+      }
+
       final url = widget.mediaItems[index].url;
-      final response = await http.get(Uri.parse(url));
+
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; Flutter app)',
+          'Accept': 'application/pdf,*/*',
+        },
+      ).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw TimeoutException(
+          'Connection timeout after 30 seconds',
+          const Duration(seconds: 30),
+        ),
+      );
 
       if (response.statusCode == 200) {
         final bytes = response.bodyBytes;
@@ -164,12 +225,14 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
 
         setState(() {
           _localPaths[index] = file.path;
+          _currentRetryAttempt = 0; // reset retry counter
         });
+      } else {
+        throw HttpException('HTTP ${response.statusCode}: ${response.reasonPhrase}');
       }
     } catch (e) {
-      setState(() {
-        _error = 'Failed to load PDF: $e';
-      });
+      // ปล่อยให้ retry mechanism จัดการ
+      rethrow;
     } finally {
       setState(() {
         _downloadingStates[index] = false;
@@ -181,51 +244,84 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   Future<void> _downloadFile() async {
     final currentItem = widget.mediaItems[_currentIndex];
 
-    // Request storage permission
-    PermissionStatus storagePermission = await PermissionUtil.requestStoragePermission();
-    if (storagePermission.isGranted) {
-      try {
-        final response = await http.get(Uri.parse(currentItem.url));
-        if (response.statusCode == 200) {
-          final bytes = response.bodyBytes;
-          final dir = await getExternalStorageDirectory();
-          final fileName =
-              currentItem.title ??
-              'download_${DateTime.now().millisecondsSinceEpoch}';
-          final extension = currentItem.url.split('.').last;
-          final file = File('${dir!.path}/$fileName.$extension');
-
-          await file.writeAsBytes(bytes);
-
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Downloaded to ${file.path}')));
-        }
-      } catch (e) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Download failed: $e')));
+    try {
+      // Request storage permission
+      PermissionStatus storagePermission = await PermissionUtil.requestStoragePermission();
+      if (!storagePermission.isGranted) {
+        _showSnackBar('Storage permission denied');
+        return;
       }
+
+      Uint8List bytes;
+
+      // ใช้ localData ก่อนถ้ามี
+      if (currentItem.hasLocalData) {
+        bytes = currentItem.localData!;
+      } else {
+        if (!await _checkNetworkConnection()) {
+          throw const SocketException('No internet connection');
+        }
+
+        final response = await http.get(Uri.parse(currentItem.url)).timeout(
+          const Duration(seconds: 60), // เพิ่มเวลาสำหรับดาวน์โหลด
+        );
+
+        if (response.statusCode != 200) {
+          throw HttpException('Failed to download file: HTTP ${response.statusCode}');
+        }
+        bytes = response.bodyBytes;
+      }
+
+      final dir = await getExternalStorageDirectory();
+      if (dir == null) {
+        throw Exception('Cannot access external storage');
+      }
+
+      final fileName = _sanitizeFileName(currentItem.title ?? 'download_${DateTime.now().millisecondsSinceEpoch}');
+      final extension = currentItem.url.split('.').last;
+      final file = File('${dir.path}/$fileName.$extension');
+      await file.writeAsBytes(bytes);
+
+      _showSnackBar('Downloaded to ${file.path}');
+    } catch (e) {
+      _showSnackBar('Download failed: $e');
+    }
+  }
+
+  // Helper method สำหรับ sanitize filename
+  String _sanitizeFileName(String fileName) {
+    return fileName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+  }
+
+  // Helper method สำหรับ show snackbar
+  void _showSnackBar(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
     }
   }
 
   Future<void> _copyLink() async {
     final currentItem = widget.mediaItems[_currentIndex];
     await Clipboard.setData(ClipboardData(text: currentItem.url));
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Link copied to clipboard')));
+    _showSnackBar('Link copied to clipboard');
   }
 
   void _onPageChanged(int index) {
     setState(() {
       _currentIndex = index;
+      _error = null; // reset error เมื่อเปลี่ยนหน้า
+      _currentRetryAttempt = 0; // reset retry counter
     });
 
-    // Preload PDF if needed
-    if (widget.mediaItems[index].type == MediaType.pdf &&
-        _localPaths[index] == null) {
-      _downloadPDF(index);
+    final currentItem = widget.mediaItems[index];
+    if (currentItem.type == MediaType.pdf && _localPaths[index] == null) {
+      if (currentItem.hasLocalData) {
+        _savePDFFromLocalData(index);
+      } else {
+        _downloadPDFWithRetry(index);
+      }
     }
   }
 
@@ -233,13 +329,20 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
     final currentItem = widget.mediaItems[_currentIndex];
 
     if (_isLoading && _downloadingStates[_currentIndex] == true) {
-      return const Center(
+      return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('Loading...'),
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            const Text('Loading...'),
+            if (_currentRetryAttempt > 0) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Retry attempt $_currentRetryAttempt/3',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
           ],
         ),
       );
@@ -247,23 +350,41 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
 
     if (_error != null) {
       return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.error, size: 64, color: Colors.red),
-            const SizedBox(height: 16),
-            Text(_error!, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _error = null;
-                });
-                _preloadCurrentFile();
-              },
-              child: const Text('Retry'),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error, size: 64, color: Colors.red),
+              const SizedBox(height: 16),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 14),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ElevatedButton(
+                    onPressed: () {
+                      setState(() {
+                        _error = null;
+                        _currentRetryAttempt = 0;
+                      });
+                      _preloadCurrentFile();
+                    },
+                    child: const Text('Retry'),
+                  ),
+                  const SizedBox(width: 16),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Close'),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -280,7 +401,12 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
             pageFling: false,
             onError: (error) {
               setState(() {
-                _error = error.toString();
+                _error = 'PDF Error: $error';
+              });
+            },
+            onPageError: (page, error) {
+              setState(() {
+                _error = 'PDF Page $page Error: $error';
               });
             },
           );
@@ -290,16 +416,35 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
       case MediaType.image:
         return InteractiveViewer(
           child: Center(
-            child: Image.network(
+            child: currentItem.hasLocalData
+                ? Image.memory(
+              currentItem.localData!,
+              fit: BoxFit.contain,
+              errorBuilder: (context, error, stackTrace) {
+                return const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.error, size: 64, color: Colors.red),
+                      SizedBox(height: 16),
+                      Text('Failed to load local image'),
+                    ],
+                  ),
+                );
+              },
+            )
+                : Image.network(
               currentItem.url,
               fit: BoxFit.contain,
+              headers: const {
+                'User-Agent': 'Mozilla/5.0 (compatible; Flutter app)',
+              },
               loadingBuilder: (context, child, loadingProgress) {
                 if (loadingProgress == null) return child;
                 return Center(
                   child: CircularProgressIndicator(
                     value: loadingProgress.expectedTotalBytes != null
-                        ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
+                        ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
                         : null,
                   ),
                 );
@@ -332,6 +477,7 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
       color: Colors.black54,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
         itemCount: widget.mediaItems.length,
         itemBuilder: (context, index) {
           final item = widget.mediaItems[index];
@@ -361,9 +507,23 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
                   fit: StackFit.expand,
                   children: [
                     if (item.type == MediaType.image)
-                      Image.network(
+                      item.hasLocalData
+                          ? Image.memory(
+                        item.localData!,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Colors.grey[300],
+                            child: const Icon(Icons.error),
+                          );
+                        },
+                      )
+                          : Image.network(
                         item.url,
                         fit: BoxFit.cover,
+                        headers: const {
+                          'User-Agent': 'Mozilla/5.0 (compatible; Flutter app)',
+                        },
                         errorBuilder: (context, error, stackTrace) {
                           return Container(
                             color: Colors.grey[300],
@@ -375,9 +535,7 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
                       Container(
                         color: Colors.grey[300],
                         child: Icon(
-                          item.type == MediaType.pdf
-                              ? Icons.picture_as_pdf
-                              : Icons.video_library,
+                          item.type == MediaType.pdf ? Icons.picture_as_pdf : Icons.video_library,
                           size: 24,
                         ),
                       ),
@@ -391,10 +549,11 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
-                          item.type.name,
+                          item.type.name.toUpperCase(),
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 8,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
                       ),
@@ -407,6 +566,57 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
         },
       ),
     );
+  }
+
+  Future<bool> _checkNetworkConnection() async {
+    try {
+      final result = await InternetAddress.lookup('google.com').timeout(
+        const Duration(seconds: 5),
+      );
+      return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
+    } on SocketException catch (_) {
+      return false;
+    } on TimeoutException catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _downloadPDFWithRetry(int index, {int maxRetries = 3}) async {
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        setState(() {
+          _currentRetryAttempt = attempt;
+        });
+
+        await _downloadPDF(index);
+        return; // สำเร็จแล้ว
+      } catch (e) {
+        if (attempt == maxRetries) {
+          // ครบจำนวนครั้งแล้ว
+          setState(() {
+            _error = 'Failed after $maxRetries attempts:\n${_getErrorMessage(e)}';
+            _downloadingStates[index] = false;
+            _isLoading = false;
+            _currentRetryAttempt = 0;
+          });
+        } else {
+          // รอแล้วลองใหม่
+          await Future.delayed(Duration(seconds: attempt * 2));
+        }
+      }
+    }
+  }
+
+  String _getErrorMessage(dynamic error) {
+    if (error is SocketException) {
+      return 'Network connection failed. Please check your internet connection.';
+    } else if (error is TimeoutException) {
+      return 'Connection timeout. Please try again.';
+    } else if (error is HttpException) {
+      return 'Server error: ${error.message}';
+    } else {
+      return error.toString();
+    }
   }
 
   @override
@@ -424,6 +634,7 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
             Text(
               currentItem.title ?? 'Media Viewer',
               style: const TextStyle(fontSize: 16),
+              overflow: TextOverflow.ellipsis,
             ),
             if (widget.mediaItems.length > 1)
               Text(
@@ -455,18 +666,18 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
           Expanded(
             child: widget.enableSwipe && widget.mediaItems.length > 1
                 ? PageView.builder(
-                    controller: _pageController,
-                    onPageChanged: _onPageChanged,
-                    itemCount: widget.mediaItems.length,
-                    itemBuilder: (context, index) {
-                      // Only build current page to avoid loading all PDFs at once
-                      if (index == _currentIndex) {
-                        return _buildCurrentMedia();
-                      } else {
-                        return Container();
-                      }
-                    },
-                  )
+              controller: _pageController,
+              onPageChanged: _onPageChanged,
+              itemCount: widget.mediaItems.length,
+              itemBuilder: (context, index) {
+                // Only build current page
+                if (index == _currentIndex) {
+                  return _buildCurrentMedia();
+                } else {
+                  return Container();
+                }
+              },
+            )
                 : _buildCurrentMedia(),
           ),
           _buildThumbnailStrip(),
@@ -482,15 +693,16 @@ extension BuildContextExtension on BuildContext {
     required String url,
     MediaType? type,
     String? title,
+    Uint8List? localData,
   }) async {
     await UniversalMediaDialog.showSingle(
       context: this,
       url: url,
       type: type ?? UniversalMediaDialog._detectMediaType(url),
       title: title,
+      localData: localData,
     );
   }
-
 
   Future<void> showMultiple({
     required List<MediaItemModel> mediaItems,
