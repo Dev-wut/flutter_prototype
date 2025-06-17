@@ -136,25 +136,34 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   final Set<int> _preloadedIndexes = {}; // เก็บ index ที่ preload แล้ว
   Timer? _preloadTimer; // สำหรับ delayed preloading
 
+  // Thumbnail ListView Controller
+  late ScrollController _thumbnailController;
+
   @override
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex;
     _pageController = PageController(initialPage: widget.initialIndex);
+    _thumbnailController = ScrollController();
     _preloadCurrentFile();
   }
 
   @override
   void dispose() {
     _pageController.dispose();
+    _thumbnailController.dispose();
     _preloadTimer?.cancel(); // cancel timer
     _cleanupTempFiles(); // cleanup temp files
     super.dispose();
   }
 
-  // Cleanup temporary files เมื่อปิด dialog
+  // Cleanup temporary files เมื่อปิด dialog รวมทั้ง dispose image cache
   Future<void> _cleanupTempFiles() async {
     try {
+      // Clear image cache เพื่อป้องกัน buffer leak
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+
       final dir = await getTemporaryDirectory();
       final tempFiles = await dir.list().where((file) =>
       file.path.contains('temp_pdf_') && file.path.endsWith('.pdf')
@@ -342,6 +351,9 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
       _currentRetryAttempt = 0; // reset retry counter
     });
 
+    // Clear image cache เมื่อเปลี่ยนหน้า เพื่อป้องกัน buffer accumulation
+    PaintingBinding.instance.imageCache.clear();
+
     final currentItem = widget.mediaItems[index];
     if (currentItem.type == MediaType.pdf && _localPaths[index] == null) {
       if (currentItem.hasLocalData) {
@@ -353,6 +365,33 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
 
     // Preload adjacent pages สำหรับ smooth experience
     _schedulePreloading(index);
+
+    // Auto scroll thumbnail ไปยัง current item
+    _scrollThumbnailToIndex(index);
+  }
+
+  // Auto scroll thumbnail เพื่อให้ current item อยู่ตรงกลางจอ
+  void _scrollThumbnailToIndex(int index) {
+    if (!widget.showThumbnails || widget.mediaItems.length <= 1) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_thumbnailController.hasClients) {
+        const itemWidth = 76.0; // 60 + 16 margin
+        final screenWidth = MediaQuery.of(context).size.width;
+        final visibleItems = (screenWidth - 120) / itemWidth; // -120 for prev/next buttons
+
+        // คำนวณตำแหน่งให้ current item อยู่ตรงกลาง
+        final targetPosition = (index * itemWidth) - (visibleItems * itemWidth / 2) + (itemWidth / 2);
+        final maxScroll = _thumbnailController.position.maxScrollExtent;
+        final clampedPosition = targetPosition.clamp(0.0, maxScroll);
+
+        _thumbnailController.animateTo(
+          clampedPosition,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+        );
+      }
+    });
   }
 
   // Schedule preloading ของ adjacent pages
@@ -575,106 +614,187 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
     return Container(
       height: 80,
       color: Colors.black54,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        itemCount: widget.mediaItems.length,
-        // Performance: ใช้ itemExtent สำหรับ better scrolling
-        itemExtent: 76, // 60 width + 16 margin
-        // Performance: เก็บ thumbnail widget ใน cache
-        cacheExtent: 400, // cache thumbnails
-        itemBuilder: (context, index) {
-          final item = widget.mediaItems[index];
-          final isSelected = index == _currentIndex;
-
-          return GestureDetector(
-            onTap: () {
-              _pageController.animateToPage(
-                index,
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeInOut,
-              );
-            },
-            child: Container(
-              width: 60,
-              margin: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                border: Border.all(
-                  color: isSelected ? Colors.blue : Colors.transparent,
-                  width: 2,
-                ),
-                borderRadius: BorderRadius.circular(8),
+      child: Row(
+        children: [
+          // Previous Button
+          Container(
+            width: 60,
+            margin: const EdgeInsets.all(8),
+            child: IconButton(
+              onPressed: _currentIndex > 0 ? _previousPage : null,
+              icon: Icon(
+                Icons.chevron_left,
+                color: _currentIndex > 0 ? Colors.white : Colors.grey,
+                size: 32,
               ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (item.type == MediaType.image)
-                      item.hasLocalData
-                          ? Image.memory(
-                        item.localData!,
-                        fit: BoxFit.cover,
-                        // Performance: ลด memory usage สำหรับ thumbnail
-                        cacheWidth: 120,
-                        cacheHeight: 120,
-                        errorBuilder: (context, error, stackTrace) {
-                          return Container(
-                            color: Colors.grey[300],
-                            child: const Icon(Icons.error),
-                          );
-                        },
-                      )
-                          : Image.network(
-                        item.url,
-                        fit: BoxFit.cover,
-                        // Performance optimizations สำหรับ network images
-                        cacheWidth: 120,
-                        cacheHeight: 120,
-                        headers: const {
-                          'User-Agent': 'Mozilla/5.0 (compatible; Flutter app)',
-                        },
-                        errorBuilder: (context, error, stackTrace) {
-                          return Container(
-                            color: Colors.grey[300],
-                            child: const Icon(Icons.error),
-                          );
-                        },
-                      )
-                    else
-                      Container(
-                        color: Colors.grey[300],
-                        child: Icon(
-                          item.type == MediaType.pdf ? Icons.picture_as_pdf : Icons.video_library,
-                          size: 24,
-                        ),
+              tooltip: 'Previous',
+            ),
+          ),
+
+          // Thumbnail ListView
+          Expanded(
+            child: ListView.builder(
+              controller: _thumbnailController,
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              itemCount: widget.mediaItems.length,
+              // เพิ่ม cacheExtent เพื่อจำกัดการโหลด
+              cacheExtent: 200, // จำกัด cache area
+              // Dynamic item width based on screen size
+              itemBuilder: (context, index) {
+                final item = widget.mediaItems[index];
+                final isSelected = index == _currentIndex;
+
+                // คำนวณขนาด thumbnail ตามหน้าจอ
+                final screenWidth = MediaQuery.of(context).size.width;
+                final availableWidth = screenWidth - 120; // minus prev/next buttons
+                final maxItems = 6; // แสดงไม่เกิน 6 items
+                final minItemWidth = 60.0;
+                final calculatedWidth = (availableWidth / maxItems).clamp(minItemWidth, 80.0);
+
+                return GestureDetector(
+                  onTap: () => _goToPage(index),
+                  child: Container(
+                    width: calculatedWidth,
+                    margin: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: isSelected ? Colors.blue : Colors.transparent,
+                        width: 2,
                       ),
-                    Positioned(
-                      bottom: 2,
-                      right: 2,
-                      child: Container(
-                        padding: const EdgeInsets.all(2),
-                        decoration: BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          item.type.name.toUpperCase(),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 8,
-                            fontWeight: FontWeight.bold,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          if (item.type == MediaType.image)
+                            item.hasLocalData
+                                ? Image.memory(
+                              item.localData!,
+                              fit: BoxFit.cover,
+                              // Performance: ลด memory usage สำหรับ thumbnail มากขึ้น
+                              cacheWidth: 80, // ลดจาก 120
+                              cacheHeight: 80, // ลดจาก 120
+                              errorBuilder: (context, error, stackTrace) {
+                                return Container(
+                                  color: Colors.grey[300],
+                                  child: const Icon(Icons.error, size: 16),
+                                );
+                              },
+                            )
+                                : Image.network(
+                              item.url,
+                              fit: BoxFit.cover,
+                              // Performance: ลด memory usage มากขึ้น
+                              cacheWidth: 80, // ลดจาก 120
+                              cacheHeight: 80, // ลดจาก 120
+                              headers: const {
+                                'User-Agent': 'Mozilla/5.0 (compatible; Flutter app)',
+                              },
+                              // เพิ่ม loading placeholder
+                              loadingBuilder: (context, child, loadingProgress) {
+                                if (loadingProgress == null) return child;
+                                return Container(
+                                  color: Colors.grey[300],
+                                  child: const Center(
+                                    child: SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    ),
+                                  ),
+                                );
+                              },
+                              errorBuilder: (context, error, stackTrace) {
+                                return Container(
+                                  color: Colors.grey[300],
+                                  child: const Icon(Icons.error, size: 16),
+                                );
+                              },
+                            )
+                          else
+                            Container(
+                              color: Colors.grey[300],
+                              child: Icon(
+                                item.type == MediaType.pdf ? Icons.picture_as_pdf : Icons.video_library,
+                                size: 24,
+                              ),
+                            ),
+                          Positioned(
+                            bottom: 2,
+                            right: 2,
+                            child: Container(
+                              padding: const EdgeInsets.all(2),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                item.type.name.toUpperCase(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
                           ),
-                        ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             ),
-          );
-        },
+          ),
+
+          // Next Button
+          Container(
+            width: 60,
+            margin: const EdgeInsets.all(8),
+            child: IconButton(
+              onPressed: _currentIndex < widget.mediaItems.length - 1 ? _nextPage : null,
+              icon: Icon(
+                Icons.chevron_right,
+                color: _currentIndex < widget.mediaItems.length - 1 ? Colors.white : Colors.grey,
+                size: 32,
+              ),
+              tooltip: 'Next',
+            ),
+          ),
+        ],
       ),
+    );
+  }
+
+  // Navigation methods
+  void _previousPage() {
+    if (_currentIndex > 0) {
+      _pageController.animateToPage(
+        _currentIndex - 1,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  void _nextPage() {
+    if (_currentIndex < widget.mediaItems.length - 1) {
+      _pageController.animateToPage(
+        _currentIndex + 1,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  void _goToPage(int index) {
+    _pageController.animateToPage(
+      index,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
     );
   }
 
@@ -779,6 +899,8 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
               controller: _pageController,
               onPageChanged: _onPageChanged,
               itemCount: widget.mediaItems.length,
+              // ปิด swipe gesture สำหรับ PDF compatibility
+              physics: const NeverScrollableScrollPhysics(),
               itemBuilder: (context, index) {
                 // Only build current page
                 if (index == _currentIndex) {
