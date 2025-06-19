@@ -1,5 +1,6 @@
 import 'package:go_router/go_router.dart';
 
+import '../../features/document_viewer/document_page.dart';
 import '../../features/home/home_page.dart';
 import '../../features/universal_media_viewer/universal_media_viewer.dart';
 
@@ -8,7 +9,8 @@ enum AppRoutes {
   universalMediaViewer(
     name: 'universalMediaViewer',
     path: '/universalMediaViewer',
-  );
+  ),
+  mediaViewer(name: 'mediaViewer', path: '/mediaViewer');
 
   final String name;
   final String path;
@@ -31,6 +33,11 @@ final class RouteConfig {
         name: AppRoutes.universalMediaViewer.name,
         path: AppRoutes.universalMediaViewer.path,
         builder: (context, state) => const UniversalMediaViewer(),
+      ),
+      GoRoute(
+        name: AppRoutes.mediaViewer.name,
+        path: AppRoutes.mediaViewer.path,
+        builder: (context, state) => const DocumentPage(),
       ),
     ],
   );

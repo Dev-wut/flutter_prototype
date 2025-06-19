@@ -12,6 +12,7 @@ class HomePage extends StatelessWidget {
 
     final featureList = <String, String>{
       AppRoutes.universalMediaViewer.name : "Universal Media Viewer",
+      AppRoutes.mediaViewer.name : "Media Viewer",
     };
 
     return Scaffold(
@@ -24,7 +25,7 @@ class HomePage extends StatelessWidget {
             'Welcome, Flutter Prototype!',
             style: Theme.of(context).textTheme.displayMedium,
           ),
-          SizedBox(height: 20),
+          const SizedBox(height: 20),
           Expanded(
             child: SingleChildScrollView(
               child: CustomPadding(
