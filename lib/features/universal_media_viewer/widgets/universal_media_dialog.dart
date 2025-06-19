@@ -19,6 +19,8 @@ class UniversalMediaDialog extends StatefulWidget {
     this.showThumbnails = true,
     this.enableSwipe = true,
     this.title,
+    this.showPDFNavigation = true, // เพิ่ม parameter นี้
+    this.showPDFPageInfo = true,   // เพิ่ม parameter นี้
   });
 
   final List<MediaItemModel> mediaItems;
@@ -26,6 +28,8 @@ class UniversalMediaDialog extends StatefulWidget {
   final bool showThumbnails;
   final bool enableSwipe;
   final String? title;
+  final bool showPDFNavigation;  // แสดง/ซ่อน PDF navigation buttons
+  final bool showPDFPageInfo;    // แสดง/ซ่อน PDF page info
 
   // Static helper methods
   static Future<void> showSingle({
@@ -33,7 +37,9 @@ class UniversalMediaDialog extends StatefulWidget {
     required String url,
     required MediaType type,
     String? title,
-    Uint8List? localData
+    Uint8List? localData,
+    bool showPDFNavigation = true,  // เพิ่ม parameter
+    bool showPDFPageInfo = true,    // เพิ่ม parameter
   }) async {
     final mediaItem = MediaItemModel(
       url: url,
@@ -49,6 +55,8 @@ class UniversalMediaDialog extends StatefulWidget {
           mediaItems: [mediaItem],
           initialIndex: 0,
           showThumbnails: false,
+          showPDFNavigation: showPDFNavigation,  // ส่งต่อ parameter
+          showPDFPageInfo: showPDFPageInfo,      // ส่งต่อ parameter
         ),
       ),
     );
@@ -59,6 +67,8 @@ class UniversalMediaDialog extends StatefulWidget {
     required List<MediaItemModel> mediaItems,
     int initialIndex = 0,
     String? title,
+    bool showPDFNavigation = true,  // เพิ่ม parameter
+    bool showPDFPageInfo = true,    // เพิ่ม parameter
   }) async {
     await showDialog(
       context: context,
@@ -67,6 +77,8 @@ class UniversalMediaDialog extends StatefulWidget {
           mediaItems: mediaItems,
           initialIndex: initialIndex,
           title: title,
+          showPDFNavigation: showPDFNavigation,  // ส่งต่อ parameter
+          showPDFPageInfo: showPDFPageInfo,      // ส่งต่อ parameter
         ),
       ),
     );
@@ -78,6 +90,8 @@ class UniversalMediaDialog extends StatefulWidget {
     List<String>? titles,
     int initialIndex = 0,
     String? dialogTitle,
+    bool showPDFNavigation = true,  // เพิ่ม parameter
+    bool showPDFPageInfo = true,    // เพิ่ม parameter
   }) async {
     final mediaItems = urls.asMap().entries.map((entry) {
       final index = entry.key;
@@ -96,6 +110,8 @@ class UniversalMediaDialog extends StatefulWidget {
           mediaItems: mediaItems,
           initialIndex: initialIndex,
           title: dialogTitle,
+          showPDFNavigation: showPDFNavigation,  // ส่งต่อ parameter
+          showPDFPageInfo: showPDFPageInfo,      // ส่งต่อ parameter
         ),
       ),
     );
@@ -135,6 +151,11 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   final Map<int, bool> _preloadingStates = {}; // ติดตาม preloading
   final Set<int> _preloadedIndexes = {}; // เก็บ index ที่ preload แล้ว
   Timer? _preloadTimer; // สำหรับ delayed preloading
+
+  // PDF page tracking
+  int _currentPDFPage = 1;
+  int _totalPDFPages = 0;
+  PDFViewController? _pdfViewController;
 
   // Thumbnail ListView Controller
   late ScrollController _thumbnailController;
@@ -349,6 +370,10 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
       _currentIndex = index;
       _error = null; // reset error เมื่อเปลี่ยนหน้า
       _currentRetryAttempt = 0; // reset retry counter
+      // Reset PDF page info เมื่อเปลี่ยนไฟล์
+      _currentPDFPage = 1;
+      _totalPDFPages = 0;
+      _pdfViewController = null;
     });
 
     // Clear image cache เมื่อเปลี่ยนหน้า เพื่อป้องกัน buffer accumulation
@@ -532,22 +557,110 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
       case MediaType.pdf:
         final localPath = _localPaths[_currentIndex];
         if (localPath != null) {
-          return PDFView(
-            filePath: localPath,
-            enableSwipe: true,
-            swipeHorizontal: false,
-            autoSpacing: false,
-            pageFling: false,
-            onError: (error) {
-              setState(() {
-                _error = 'PDF Error: $error';
-              });
-            },
-            onPageError: (page, error) {
-              setState(() {
-                _error = 'PDF Page $page Error: $error';
-              });
-            },
+          return Stack(
+            children: [
+              // PDF Viewer
+              PDFView(
+                filePath: localPath,
+                enableSwipe: true,
+                swipeHorizontal: false,
+                autoSpacing: false,
+                pageFling: false,
+                onRender: (pages) {
+                  setState(() {
+                    _totalPDFPages = pages ?? 0;
+                  });
+                },
+                onViewCreated: (PDFViewController pdfViewController) {
+                  _pdfViewController = pdfViewController;
+                },
+                onPageChanged: (page, total) {
+                  setState(() {
+                    _currentPDFPage = (page ?? 0) + 1; // PDF pages start from 0
+                    _totalPDFPages = total ?? 0;
+                  });
+                },
+                onError: (error) {
+                  setState(() {
+                    _error = 'PDF Error: $error';
+                  });
+                },
+                onPageError: (page, error) {
+                  setState(() {
+                    _error = 'PDF Page $page Error: $error';
+                  });
+                },
+              ),
+
+              // PDF Page Info
+              if (widget.showPDFPageInfo && _totalPDFPages > 0)
+                Positioned(
+                  top: 16,
+                  right: 16,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.7),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Text(
+                      '$_currentPDFPage / $_totalPDFPages',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
+
+              // PDF Navigation Controls (แสดงที่มุมล่างขวา)
+              if (widget.showPDFNavigation && _totalPDFPages > 1)
+                Positioned(
+                  bottom: 16,
+                  right: 16,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.7),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          onPressed: _currentPDFPage > 1 ? _previousPDFPage : null,
+                          icon: Icon(
+                            Icons.keyboard_arrow_up,
+                            color: _currentPDFPage > 1 ? Colors.white : Colors.grey,
+                          ),
+                          tooltip: 'Previous Page',
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Text(
+                            '$_currentPDFPage',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        IconButton(
+                          onPressed: _currentPDFPage < _totalPDFPages ? _nextPDFPage : null,
+                          icon: Icon(
+                            Icons.keyboard_arrow_down,
+                            color: _currentPDFPage < _totalPDFPages ? Colors.white : Colors.grey,
+                          ),
+                          tooltip: 'Next Page',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
           );
         } else {
           return const Center(child: CircularProgressIndicator());
@@ -648,8 +761,8 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
                 // คำนวณขนาด thumbnail ตามหน้าจอ
                 final screenWidth = MediaQuery.of(context).size.width;
                 final availableWidth = screenWidth - 120; // minus prev/next buttons
-                final maxItems = 6; // แสดงไม่เกิน 6 items
-                final minItemWidth = 60.0;
+                const maxItems = 6; // แสดงไม่เกิน 6 items
+                const minItemWidth = 60.0;
                 final calculatedWidth = (availableWidth / maxItems).clamp(minItemWidth, 80.0);
 
                 return GestureDetector(
@@ -798,6 +911,19 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
     );
   }
 
+  // PDF Navigation Methods
+  void _previousPDFPage() {
+    if (_pdfViewController != null && _currentPDFPage > 1) {
+      _pdfViewController!.setPage(_currentPDFPage - 2); // PDF pages start from 0
+    }
+  }
+
+  void _nextPDFPage() {
+    if (_pdfViewController != null && _currentPDFPage < _totalPDFPages) {
+      _pdfViewController!.setPage(_currentPDFPage); // PDF pages start from 0
+    }
+  }
+
   Future<bool> _checkNetworkConnection() async {
     try {
       final result = await InternetAddress.lookup('google.com').timeout(
@@ -926,6 +1052,8 @@ extension BuildContextExtension on BuildContext {
     MediaType? type,
     String? title,
     Uint8List? localData,
+    bool showPDFNavigation = true,  // เพิ่ม parameter
+    bool showPDFPageInfo = true,    // เพิ่ม parameter
   }) async {
     await UniversalMediaDialog.showSingle(
       context: this,
@@ -933,6 +1061,8 @@ extension BuildContextExtension on BuildContext {
       type: type ?? UniversalMediaDialog._detectMediaType(url),
       title: title,
       localData: localData,
+      showPDFNavigation: showPDFNavigation,  // ส่งต่อ parameter
+      showPDFPageInfo: showPDFPageInfo,      // ส่งต่อ parameter
     );
   }
 
@@ -940,12 +1070,16 @@ extension BuildContextExtension on BuildContext {
     required List<MediaItemModel> mediaItems,
     int initialIndex = 0,
     String? title,
+    bool showPDFNavigation = true,  // เพิ่ม parameter
+    bool showPDFPageInfo = true,    // เพิ่ม parameter
   }) async {
     await UniversalMediaDialog.showMultiple(
       context: this,
       mediaItems: mediaItems,
       initialIndex: initialIndex,
       title: title,
+      showPDFNavigation: showPDFNavigation,  // ส่งต่อ parameter
+      showPDFPageInfo: showPDFPageInfo,      // ส่งต่อ parameter
     );
   }
 
@@ -954,6 +1088,8 @@ extension BuildContextExtension on BuildContext {
     List<String>? titles,
     int initialIndex = 0,
     String? title,
+    bool showPDFNavigation = true,  // เพิ่ม parameter
+    bool showPDFPageInfo = true,    // เพิ่ม parameter
   }) async {
     await UniversalMediaDialog.showFromUrls(
       context: this,
@@ -961,6 +1097,8 @@ extension BuildContextExtension on BuildContext {
       titles: titles,
       initialIndex: initialIndex,
       dialogTitle: title,
+      showPDFNavigation: showPDFNavigation,  // ส่งต่อ parameter
+      showPDFPageInfo: showPDFPageInfo,      // ส่งต่อ parameter
     );
   }
 }
