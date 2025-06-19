@@ -122,13 +122,6 @@ class UniversalMediaDialog extends StatefulWidget {
     switch (extension) {
       case 'pdf':
         return MediaType.pdf;
-      case 'jpg':
-      case 'jpeg':
-      case 'png':
-      case 'gif':
-      case 'webp':
-      case 'bmp':
-        return MediaType.image;
       default:
         return MediaType.image;
     }
@@ -163,19 +156,38 @@ class _UniversalMediaDialogState extends State<UniversalMediaDialog> {
   @override
   void initState() {
     super.initState();
+    _setInitialOrientation();
     _currentIndex = widget.initialIndex;
     _pageController = PageController(initialPage: widget.initialIndex);
     _thumbnailController = ScrollController();
     _preloadCurrentFile();
   }
 
+  Future<void> _setInitialOrientation() async {
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.portraitUp,
+    ]);
+  }
+
   @override
   void dispose() {
+    _disposeInitialOrientation();
     _pageController.dispose();
     _thumbnailController.dispose();
     _preloadTimer?.cancel(); // cancel timer
     _cleanupTempFiles(); // cleanup temp files
     super.dispose();
+  }
+
+  Future<void> _disposeInitialOrientation() async {
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+      DeviceOrientation.portraitUp,
+    ]);
   }
 
   // Cleanup temporary files เมื่อปิด dialog รวมทั้ง dispose image cache
